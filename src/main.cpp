@@ -20,6 +20,8 @@
 using namespace esp_panel::drivers;
 using namespace esp_panel::board;
 
+static constexpr uint8_t inputs[] = {10, 11, 12, 13, 17};
+
 static void button_event_cb(lv_event_t *e)
 {
     lv_obj_t *label = (lv_obj_t *)lv_event_get_user_data(e);
@@ -34,6 +36,10 @@ static bool screen_switched = false;
 void setup()
 {
     Serial.begin(115200);
+
+    for (uint8_t pin : inputs) {
+        pinMode(pin, INPUT_PULLUP);
+    }
 
     Serial.println("Initializing board");
     Board *board = new Board();
