@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <esp_display_panel.hpp>
 #include <lvgl.h>
+#include "actions.h"
 #include "lvgl_v9_port.h"
 #include "screens.h"
 
@@ -20,7 +21,34 @@
 using namespace esp_panel::drivers;
 using namespace esp_panel::board;
 
-static constexpr uint8_t inputs[] = {10, 11, 12, 13, 17};
+struct InputBinding {
+    uint8_t pin;
+    void (*high_action)();
+    void (*low_action)();
+};
+
+static constexpr InputBinding inputs[] = {
+    {10, input1_high_action, input1_low_action},
+    {11, input2_high_action, input2_low_action},
+    {12, input3_high_action, input3_low_action},
+    {13, input4_high_action, input4_low_action},
+    {17, input5_high_action, input5_low_action},
+};
+static constexpr unsigned long INPUT_DEBOUNCE_MS = 100;
+static uint8_t input_indices[] = {0, 1, 2, 3, 4};
+static int input_states[] = {HIGH, HIGH, HIGH, HIGH, HIGH};
+static int input_candidates[] = {HIGH, HIGH, HIGH, HIGH, HIGH};
+static unsigned long input_candidate_since[sizeof(inputs) / sizeof(inputs[0])] = {};
+static volatile bool input_edge_pending[sizeof(inputs) / sizeof(inputs[0])] = {};
+static portMUX_TYPE input_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR input_interrupt(void *arg)
+{
+    uint8_t index = *static_cast<uint8_t *>(arg);
+    portENTER_CRITICAL_ISR(&input_mux);
+    input_edge_pending[index] = true;
+    portEXIT_CRITICAL_ISR(&input_mux);
+}
 
 static void button_event_cb(lv_event_t *e)
 {
@@ -37,8 +65,11 @@ void setup()
 {
     Serial.begin(115200);
 
-    for (uint8_t pin : inputs) {
-        pinMode(pin, INPUT_PULLUP);
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        pinMode(inputs[i].pin, INPUT_PULLUP);
+        input_states[i] = digitalRead(inputs[i].pin);
+        input_candidates[i] = input_states[i];
+        attachInterruptArg(inputs[i].pin, input_interrupt, &input_indices[i], CHANGE);
     }
 
     Serial.println("Initializing board");
@@ -113,6 +144,33 @@ void setup()
 
 void loop()
 {
+    unsigned long now = millis();
+    bool pending_edges[sizeof(inputs) / sizeof(inputs[0])];
+    portENTER_CRITICAL(&input_mux);
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        pending_edges[i] = input_edge_pending[i];
+        input_edge_pending[i] = false;
+    }
+    portEXIT_CRITICAL(&input_mux);
+
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+        if (pending_edges[i]) {
+            input_candidates[i] = digitalRead(inputs[i].pin);
+            input_candidate_since[i] = now;
+        }
+
+        if (input_candidates[i] != input_states[i] &&
+            now - input_candidate_since[i] >= INPUT_DEBOUNCE_MS &&
+            digitalRead(inputs[i].pin) == input_candidates[i]) {
+            input_states[i] = input_candidates[i];
+            if (input_states[i] == HIGH) {
+                inputs[i].high_action();
+            } else {
+                inputs[i].low_action();
+            }
+        }
+    }
+
     if (!screen_switched && millis() - screen_switch_time >= 3000) {
         if (lvgl_v9_port_lock(-1)) {
             lv_scr_load(objects.scr_main_schema);
@@ -121,6 +179,5 @@ void loop()
         }
     }
 
-    Serial.println("IDLE loop");
-    delay(1000);
+    delay(10);
 }
